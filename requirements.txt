@@ -1,0 +1,7 @@
+streamlit
+PyPDF2
+python-docx
+odfpy
+striprtf
+reportlab
+langdetect
