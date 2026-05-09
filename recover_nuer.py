@@ -80,8 +80,8 @@ CHAR_MAP = {
     '*': 'ä',     '&': 'ë',     '%': 'ɛ̈',     '#': 'ɔ̈',     '$': 'ä',
     '!': 'ï',     '\\': '/',    '/': '/',
     
-    # Additional lowercase corrections
-    '`': 'ä',     # Digits mapped separately – removed from here
+    # Additional lowercase corrections (digits removed – handled separately)
+    '`': 'ä',     
     ']': 'ɔ̱',     's': 'ɔ',
     'f': 'ɣ',     'x': 'ŋ',     'v': 'ɛ',
     
@@ -115,9 +115,9 @@ PHRASE_MAP = {
 
 # ----------------------------------------------------------------------
 # Digit mapping for inside-word conversion (separate simple mapping)
-# Edit this dictionary to change how digits are replaced inside words.
+# Default values – can be customised by user in the sidebar.
 # ----------------------------------------------------------------------
-DIGIT_MAP = {
+DEFAULT_DIGIT_MAP = {
     '0': 'ɔ',
     '1': 'ɛ',
     '2': 'ë',
@@ -129,8 +129,12 @@ DIGIT_MAP = {
     '8': 'u',
     '9': 'a'
 }
-# Build translation table for digits
-DIGIT_TRANS_TABLE = str.maketrans(DIGIT_MAP)
+
+# Initialise session state for digit mapping (persists across reruns)
+if 'digit_map' not in st.session_state:
+    st.session_state.digit_map = DEFAULT_DIGIT_MAP.copy()
+if 'digit_trans_table' not in st.session_state:
+    st.session_state.digit_trans_table = str.maketrans(st.session_state.digit_map)
 
 # English word list (common)
 ENGLISH_WORDS = set([
@@ -182,40 +186,27 @@ def convert_digits_inside_words(text: str, preserve_line_start_digits: bool = Tr
     - Digits at the very beginning of a line are preserved if preserve_line_start_digits=True.
     - Words that consist only of digits are treated as a whole: if they are at line start -> preserved,
       otherwise each digit is converted individually.
-    - Uses DIGIT_MAP for replacement.
+    - Uses the digit mapping stored in st.session_state.
     """
-    lines = text.splitlines(keepends=True)  # keep line endings
+    lines = text.splitlines(keepends=True)
     result_lines = []
-    
     for line in lines:
-        # Check if line starts with digits (optional preservation)
         if preserve_line_start_digits:
-            # Find leading digits (^[0-9]+)
             match = re.match(r'^([0-9]+)', line)
             if match:
                 leading_digits = match.group(1)
-                # Keep leading digits untouched
                 rest = line[len(leading_digits):]
-                # Process the rest of the line (convert digits inside words)
                 rest_converted = _convert_digits_in_text(rest)
                 result_lines.append(leading_digits + rest_converted)
                 continue
-        # If no leading digits or preservation disabled, convert all digits in line
         result_lines.append(_convert_digits_in_text(line))
-    
     return ''.join(result_lines)
 
 def _convert_digits_in_text(text: str) -> str:
-    """
-    Replace digits inside words only, not isolated digits that are already part of punctuation etc.
-    A "word" is defined as a sequence of letters and digits.
-    We replace all digits in such sequences, but preserve digits that are alone (e.g., "123" as a separate token).
-    Actually per user request: only digits that are at beginning of line are preserved; all other digits anywhere are converted.
-    For simplicity: replace every digit in the text (except those already preserved by line-start rule).
-    """
-    # Simple: replace all digits using DIGIT_TRANS_TABLE.
-    # The line-start preservation already removed leading digits, so this is safe.
-    return text.translate(DIGIT_TRANS_TABLE)
+    """Replace all digits using the current digit translation table."""
+    # Use session state mapping (updated by UI)
+    trans = st.session_state.get('digit_trans_table', str.maketrans(DEFAULT_DIGIT_MAP))
+    return text.translate(trans)
 
 # ----------------------------------------------------------------------
 # Fast English detection with caching
@@ -264,10 +255,8 @@ def convert_text(text: str, preserve_english: bool = False, convert_digits: bool
                     return corr
         return matched
 
-    # Step 1: Apply phrase replacements (may include digit patterns like "j2")
     text = combined_regex.sub(replacer, text)
 
-    # Step 2: If English preservation, handle token by token
     if preserve_english:
         tokens = re.split(r'(\s+|[.,!?;:()])', text)
         converted_tokens = []
@@ -275,21 +264,17 @@ def convert_text(text: str, preserve_english: bool = False, convert_digits: bool
             if is_english_word(token, use_langdetect=False):
                 converted_tokens.append(token)
             else:
-                # Apply character translation (digits excluded)
                 converted_tokens.append(token.translate(TRANS_TABLE))
         text = ''.join(converted_tokens)
     else:
-        # Apply character translation normally
         text = text.translate(TRANS_TABLE)
 
-    # Step 3: Special handling for '@'
     if '@' in text:
         if any(c in 'aeiou' for c in text):
             text = text.replace('@', 'a̠')
         else:
             text = text.replace('@', 'i̠')
 
-    # Step 4: Optional digit‑inside‑word conversion (only if enabled)
     if convert_digits:
         text = convert_digits_inside_words(text, preserve_line_start_digits=True)
 
@@ -444,18 +429,17 @@ with st.sidebar:
         "Digits at the very start of a line remain unchanged. Words that are only digits are preserved only if they start a line."
     )
     
-    # Optional: allow user to edit the digit mapping
+    # Editable digit mapping (stored in session state)
     with st.expander("✏️ Edit digit‑inside‑word mapping"):
         st.markdown("Current mapping (digit → character):")
         new_map = {}
-        for d, ch in DIGIT_MAP.items():
-            new_val = st.text_input(f"Digit {d}", value=ch, key=f"digit_{d}")
-            new_map[d] = new_val if new_val else ch
+        for d in '0123456789':
+            current = st.session_state.digit_map.get(d, DEFAULT_DIGIT_MAP.get(d, ''))
+            new_val = st.text_input(f"Digit {d}", value=current, key=f"digit_{d}")
+            new_map[d] = new_val if new_val else current
         if st.button("Update digit mapping"):
-            # Update global DIGIT_MAP and rebuild translation table
-            global DIGIT_MAP, DIGIT_TRANS_TABLE
-            DIGIT_MAP.update(new_map)
-            DIGIT_TRANS_TABLE = str.maketrans(DIGIT_MAP)
+            st.session_state.digit_map.update(new_map)
+            st.session_state.digit_trans_table = str.maketrans(st.session_state.digit_map)
             st.success("Digit mapping updated!")
             st.rerun()
     
