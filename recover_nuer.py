@@ -340,7 +340,7 @@ st.sidebar.warning(
 # Display developer credit in sidebar if enabled
 if SHOW_CREDIT_IN_UI:
     st.sidebar.markdown("---")
-    st.sidebar.info("Developed by Gatbel Duop Chol – gatbelduopchol@gmail.com")
+    st.sidebar.info("Developed by Gatbel Duop Chol – gatbelduopchol@gmail.com - https://gatbelduop.github.io/Info/")
 
 with st.sidebar:
     st.markdown("---")
