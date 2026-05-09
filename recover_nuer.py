@@ -2,6 +2,7 @@
 Nuer Font Corruption Converter – Streamlit App
 Converts corrupted Nuer fallback fonts to corrected Unicode Nuer.
 Learning: user corrections saved and reused.
+Numbers inside words (except at line start) can be optionally converted.
 """
 
 # ======================================================================
@@ -79,9 +80,9 @@ CHAR_MAP = {
     '*': 'ä',     '&': 'ë',     '%': 'ɛ̈',     '#': 'ɔ̈',     '$': 'ä',
     '!': 'ï',     '\\': '/',    '/': '/',
     
-    # Additional lowercase corrections (original second block)
-    '`': 'ä',     '1': 'a̱',     '2': 'ë',     '3': 'e̱',     '5': 'i̱',
-    '6': 'ö',     '7': 'o̱',     '0': 'ɛ̈',     ']': 'ɔ̱',     's': 'ɔ',
+    # Additional lowercase corrections
+    '`': 'ä',     # Digits mapped separately – removed from here
+    ']': 'ɔ̱',     's': 'ɔ',
     'f': 'ɣ',     'x': 'ŋ',     'v': 'ɛ',
     
     # Uppercase mappings
@@ -90,9 +91,10 @@ CHAR_MAP = {
     'F': 'Ɣ',     'X': 'Ŋ',     'V': 'Ɛ'
 }
 
-# Build fast translation table (single character replacements)
-TRANS_TABLE = str.maketrans(CHAR_MAP)
+# Build translation table, excluding digits (they are handled separately)
+TRANS_TABLE = str.maketrans({k: v for k, v in CHAR_MAP.items() if not k.isdigit()})
 
+# Phrase mappings (some contain digits like 'j2' – these are handled first)
 PHRASE_MAP = {
     "Ku,th": "Kuɔth", "Ku,]": "Kuɔɛ", "Ku=ar": "Kuäär",
     "G,,y": "Gɔɔy", "Ku``r": "Kuäär", "Nh=ok": "Nhök",
@@ -111,7 +113,26 @@ PHRASE_MAP = {
     "~=o=o": "ɣöö"
 }
 
-# English word list (common) – used for fast detection
+# ----------------------------------------------------------------------
+# Digit mapping for inside-word conversion (separate simple mapping)
+# Edit this dictionary to change how digits are replaced inside words.
+# ----------------------------------------------------------------------
+DIGIT_MAP = {
+    '0': 'ɔ',
+    '1': 'ɛ',
+    '2': 'ë',
+    '3': 'e',
+    '4': 'i',
+    '5': 'ï',
+    '6': 'ö',
+    '7': 'o',
+    '8': 'u',
+    '9': 'a'
+}
+# Build translation table for digits
+DIGIT_TRANS_TABLE = str.maketrans(DIGIT_MAP)
+
+# English word list (common)
 ENGLISH_WORDS = set([
     'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i',
     'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at',
@@ -148,10 +169,53 @@ def clear_all_corrections():
 def _build_combined_regex(corrections: Dict[str, str]) -> re.Pattern:
     """Combine phrase map and user corrections into one regex (longest first)."""
     all_items = list(PHRASE_MAP.items()) + list(corrections.items())
-    # Sort by length descending for correct matching
     all_items.sort(key=lambda x: len(x[0]), reverse=True)
     pattern = '|'.join(re.escape(orig) for orig, _ in all_items)
     return re.compile(pattern, re.IGNORECASE)
+
+# ----------------------------------------------------------------------
+# Digit‑inside‑word conversion (with preservation at line start)
+# ----------------------------------------------------------------------
+def convert_digits_inside_words(text: str, preserve_line_start_digits: bool = True) -> str:
+    """
+    Convert digits that appear inside words.
+    - Digits at the very beginning of a line are preserved if preserve_line_start_digits=True.
+    - Words that consist only of digits are treated as a whole: if they are at line start -> preserved,
+      otherwise each digit is converted individually.
+    - Uses DIGIT_MAP for replacement.
+    """
+    lines = text.splitlines(keepends=True)  # keep line endings
+    result_lines = []
+    
+    for line in lines:
+        # Check if line starts with digits (optional preservation)
+        if preserve_line_start_digits:
+            # Find leading digits (^[0-9]+)
+            match = re.match(r'^([0-9]+)', line)
+            if match:
+                leading_digits = match.group(1)
+                # Keep leading digits untouched
+                rest = line[len(leading_digits):]
+                # Process the rest of the line (convert digits inside words)
+                rest_converted = _convert_digits_in_text(rest)
+                result_lines.append(leading_digits + rest_converted)
+                continue
+        # If no leading digits or preservation disabled, convert all digits in line
+        result_lines.append(_convert_digits_in_text(line))
+    
+    return ''.join(result_lines)
+
+def _convert_digits_in_text(text: str) -> str:
+    """
+    Replace digits inside words only, not isolated digits that are already part of punctuation etc.
+    A "word" is defined as a sequence of letters and digits.
+    We replace all digits in such sequences, but preserve digits that are alone (e.g., "123" as a separate token).
+    Actually per user request: only digits that are at beginning of line are preserved; all other digits anywhere are converted.
+    For simplicity: replace every digit in the text (except those already preserved by line-start rule).
+    """
+    # Simple: replace all digits using DIGIT_TRANS_TABLE.
+    # The line-start preservation already removed leading digits, so this is safe.
+    return text.translate(DIGIT_TRANS_TABLE)
 
 # ----------------------------------------------------------------------
 # Fast English detection with caching
@@ -159,17 +223,13 @@ def _build_combined_regex(corrections: Dict[str, str]) -> re.Pattern:
 _english_cache: Dict[str, bool] = {}
 
 def is_english_word(word: str, use_langdetect: bool = False) -> bool:
-    """Check if a word is English (fast with caching)."""
     w = word.strip('.,!?;:()[]{}"\'')
     if not w or len(w) < 2:
         return False
-
     if w.lower() in ENGLISH_WORDS:
         return True
-
     if w.isalpha() and w.isascii():
         return True
-
     if use_langdetect and HAS_LANGDETECT:
         if w not in _english_cache:
             try:
@@ -178,16 +238,16 @@ def is_english_word(word: str, use_langdetect: bool = False) -> bool:
                 result = False
             _english_cache[w] = result
         return _english_cache[w]
-
     return False
 
 # ----------------------------------------------------------------------
-# Core conversion (optimised)
+# Core conversion (with optional digit‑inside‑word conversion)
 # ----------------------------------------------------------------------
-def convert_text(text: str, preserve_english: bool = False) -> str:
+def convert_text(text: str, preserve_english: bool = False, convert_digits: bool = False) -> str:
     """
     Convert corrupted Nuer text to proper Unicode.
     If preserve_english is True, attempt to keep English words unchanged.
+    If convert_digits is True, apply digit‑inside‑word conversion (line-start digits preserved).
     """
     corrections = load_user_corrections()
     combined_regex = _build_combined_regex(corrections)
@@ -204,8 +264,10 @@ def convert_text(text: str, preserve_english: bool = False) -> str:
                     return corr
         return matched
 
+    # Step 1: Apply phrase replacements (may include digit patterns like "j2")
     text = combined_regex.sub(replacer, text)
 
+    # Step 2: If English preservation, handle token by token
     if preserve_english:
         tokens = re.split(r'(\s+|[.,!?;:()])', text)
         converted_tokens = []
@@ -213,21 +275,28 @@ def convert_text(text: str, preserve_english: bool = False) -> str:
             if is_english_word(token, use_langdetect=False):
                 converted_tokens.append(token)
             else:
+                # Apply character translation (digits excluded)
                 converted_tokens.append(token.translate(TRANS_TABLE))
         text = ''.join(converted_tokens)
     else:
+        # Apply character translation normally
         text = text.translate(TRANS_TABLE)
 
+    # Step 3: Special handling for '@'
     if '@' in text:
         if any(c in 'aeiou' for c in text):
             text = text.replace('@', 'a̠')
         else:
             text = text.replace('@', 'i̠')
 
+    # Step 4: Optional digit‑inside‑word conversion (only if enabled)
+    if convert_digits:
+        text = convert_digits_inside_words(text, preserve_line_start_digits=True)
+
     return text
 
 # ----------------------------------------------------------------------
-# File readers (unchanged)
+# File readers and writers (unchanged)
 # ----------------------------------------------------------------------
 def read_txt(data: bytes) -> str:
     return data.decode('utf-8', errors='replace')
@@ -289,10 +358,11 @@ def write_pdf(text: str) -> bytes:
 # Batch conversion job
 # ----------------------------------------------------------------------
 class ConversionJob:
-    def __init__(self, files: List[Tuple[str, bytes]], output_format: str, preserve_english: bool):
+    def __init__(self, files: List[Tuple[str, bytes]], output_format: str, preserve_english: bool, convert_digits: bool):
         self.files = files
         self.output_format = output_format
         self.preserve_english = preserve_english
+        self.convert_digits = convert_digits
         self.results = []
         self.progress = 0
         self.is_done = False
@@ -315,7 +385,7 @@ class ConversionJob:
                     text = read_rtf(data)
                 else:
                     text = data.decode('utf-8', errors='replace')
-                converted = convert_text(text, self.preserve_english)
+                converted = convert_text(text, self.preserve_english, self.convert_digits)
                 out_name = Path(name).stem + self.output_format
                 if self.output_format == '.txt':
                     out_data = write_txt(converted)
@@ -338,7 +408,6 @@ class ConversionJob:
 st.set_page_config(page_title="Nuer Font Converter", layout="wide")
 st.title("📝 Nuer Font Corruption Converter")
 
-# ----- WARNING: honest limitation message -----
 st.sidebar.warning(
     "⚠️ **Important limitation**\n\n"
     "This converter is **not perfect**. Many corrupted words may remain "
@@ -348,7 +417,6 @@ st.sidebar.warning(
     "Your contributions will be saved and reused for everyone."
 )
 
-# Display developer credit in sidebar if enabled
 if SHOW_CREDIT_IN_UI:
     st.sidebar.markdown("---")
     st.sidebar.info("Developed by Gatbel Duop Chol – gatbelduopchol@gmail.com - https://gatbelduop.github.io/Info/")
@@ -362,14 +430,35 @@ with st.sidebar:
         value=False,
         help="Disable for maximum speed when converting pure Nuer text."
     )
+    convert_digits = st.checkbox(
+        "🔢 Convert digits inside words (experimental)",
+        value=False,
+        help="Convert digits that appear inside Nuer words (e.g., 'th2n' → 'thën'). Digits at the beginning of a line are preserved."
+    )
     st.markdown("---")
     st.markdown("### 📚 How it works")
     st.markdown(
         "This tool repairs text corrupted by missing Nuer font support. "
-        "It uses character mappings and learned corrections."
+        "It uses character mappings and learned corrections.\n\n"
+        "**Digit conversion rule:** Digits inside words are replaced using a separate mapping. "
+        "Digits at the very start of a line remain unchanged. Words that are only digits are preserved only if they start a line."
     )
     
-    # View & clear corrections
+    # Optional: allow user to edit the digit mapping
+    with st.expander("✏️ Edit digit‑inside‑word mapping"):
+        st.markdown("Current mapping (digit → character):")
+        new_map = {}
+        for d, ch in DIGIT_MAP.items():
+            new_val = st.text_input(f"Digit {d}", value=ch, key=f"digit_{d}")
+            new_map[d] = new_val if new_val else ch
+        if st.button("Update digit mapping"):
+            # Update global DIGIT_MAP and rebuild translation table
+            global DIGIT_MAP, DIGIT_TRANS_TABLE
+            DIGIT_MAP.update(new_map)
+            DIGIT_TRANS_TABLE = str.maketrans(DIGIT_MAP)
+            st.success("Digit mapping updated!")
+            st.rerun()
+    
     st.markdown("---")
     st.subheader("📋 User Corrections")
     corrections = load_user_corrections()
@@ -387,8 +476,8 @@ with tab1:
     input_text = st.text_area("Paste corrupted text here:", height=300)
     if st.button("Convert", key="convert_text"):
         if input_text.strip():
-            with st.spinner("Converting... (this may take a moment for large texts)"):
-                result = convert_text(input_text, preserve_english)
+            with st.spinner("Converting..."):
+                result = convert_text(input_text, preserve_english, convert_digits)
                 st.session_state['last_result'] = result
         else:
             st.warning("Please enter some text.")
@@ -409,7 +498,7 @@ with tab2:
             else:
                 st.warning(f"{f.name} exceeds {max_size_mb} MB – skipped.")
         if valid_files:
-            job = ConversionJob(valid_files, output_format, preserve_english)
+            job = ConversionJob(valid_files, output_format, preserve_english, convert_digits)
             thread = threading.Thread(target=job.run)
             thread.start()
             prog_bar = st.progress(0)
